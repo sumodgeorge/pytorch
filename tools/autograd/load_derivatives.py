@@ -61,6 +61,8 @@ def load_derivatives(derivatives_yaml_path: str, native_yaml_path: str) -> Seque
                 forward_derivatives=info.forward_derivatives,
                 all_saved_inputs=info.all_saved_inputs,
                 all_saved_outputs=info.all_saved_outputs,
+                available_named_gradients=info.available_named_gradients,
+                used_named_gradients=info.used_named_gradients,
                 args_with_derivatives=info.args_with_derivatives,
                 non_differentiable_arg_names=info.non_differentiable_arg_names,
                 output_differentiability=info.output_differentiability,
@@ -76,7 +78,8 @@ def load_derivatives(derivatives_yaml_path: str, native_yaml_path: str) -> Seque
 def cpp_arguments(f: NativeFunction) -> Sequence[Binding]:
     return CppSignatureGroup.from_native_function(f, method=False).signature.arguments()
 
-def create_derivative(f: NativeFunction, formula: str, var_names: Tuple[str, ...]) -> Derivative:
+def create_derivative(f: NativeFunction, formula: str, var_names: Tuple[str, ...],
+                      available_named_gradients: Sequence[str]) -> Derivative:
     original_formula = formula
     arguments: List[NamedCType] = [a.nctype.remove_const_ref() for a in cpp_arguments(f)]
 
@@ -87,6 +90,9 @@ def create_derivative(f: NativeFunction, formula: str, var_names: Tuple[str, ...
 
     formula, saved_inputs = saved_variables(formula, arguments, var_names)
     formula, saved_outputs = saved_variables(formula, named_returns, var_names)
+
+    named_gradients = {name for name in available_named_gradients
+                       if re.search(IDENT_REGEX.format(name), formula)}
 
     # Check that the referenced derivatives in the formula are in bounds
     for i in used_gradient_indices(formula):
@@ -102,6 +108,7 @@ def create_derivative(f: NativeFunction, formula: str, var_names: Tuple[str, ...
         var_names=var_names,
         saved_inputs=saved_inputs,
         saved_outputs=saved_outputs,
+        named_gradients=named_gradients,
     )
 
 def create_forward_derivative(f: NativeFunction, formula: str, names: Tuple[str, ...]) -> ForwardDerivative:
@@ -334,6 +341,7 @@ def create_differentiability_info(
         Sequence[ForwardDerivative],
         Sequence[Binding],
         Sequence[str],
+        Sequence[str],
     ]:
         # Set up the derivative information
         derivatives: List[Derivative] = []
@@ -342,6 +350,10 @@ def create_differentiability_info(
         args_with_derivatives_set: Set[str] = set()
 
         all_arg_names = [a.name for a in cpp_arguments(f)]
+
+        available_named_gradients = [f'grad_{ret.name}'
+                                     for ret in f.func.returns
+                                     if ret.name is not None]
 
         for raw_names in sorted(defn.keys()):
             formula = defn[raw_names]
@@ -353,7 +365,8 @@ def create_differentiability_info(
                 if formula.lower().strip() == 'non_differentiable':
                     non_differentiable_arg_names += names
                 else:
-                    derivative = create_derivative(f, formula, names)
+                    derivative = create_derivative(f, formula, names,
+                                                   available_named_gradients)
                     derivatives.append(derivative)
                     args_with_derivatives_set |= set(names)
 
@@ -374,7 +387,8 @@ def create_differentiability_info(
         # Test to see if the use of 'grads' makes sense.
         check_grad_usage(defn_name, derivatives)
 
-        return derivatives, forward_derivatives, args_with_derivatives, non_differentiable_arg_names
+        return (derivatives, forward_derivatives, args_with_derivatives,
+                non_differentiable_arg_names, available_named_gradients)
 
     # NB: Removes 'name' from defn dictionary
     specification = defn.pop('name')
@@ -422,7 +436,13 @@ def create_differentiability_info(
                            "but this is only allowed for outputs."
                            "Please use a different name in native_functions.yaml.")
 
-    derivatives, forward_derivatives, args_with_derivatives, non_differentiable_arg_names = set_up_derivatives(canonical)
+    (derivatives, forward_derivatives, args_with_derivatives,
+     non_differentiable_arg_names,
+     available_named_gradients) = set_up_derivatives(canonical)
+
+    used_named_gradients: Set[str] = set()
+    for d in derivatives:
+        used_named_gradients |= d.named_gradients
 
     return DifferentiabilityInfo(
         name=defn_name,
@@ -432,6 +452,8 @@ def create_differentiability_info(
         forward_derivatives=forward_derivatives,
         all_saved_inputs=dedup_vars([v for d in derivatives for v in d.saved_inputs]),
         all_saved_outputs=dedup_vars([v for d in derivatives for v in d.saved_outputs]),
+        available_named_gradients=available_named_gradients,
+        used_named_gradients=used_named_gradients,
         args_with_derivatives=args_with_derivatives,
         non_differentiable_arg_names=non_differentiable_arg_names,
         output_differentiability=output_differentiability,
