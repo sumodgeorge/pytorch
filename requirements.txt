@@ -20,3 +20,4 @@ setuptools>=62.3.0,<80.0
 sympy>=1.13.3
 types-dataclasses
 typing-extensions>=4.10.0
+zipp>=3.19.1 # not directly required, pinned by Snyk to avoid a vulnerability
